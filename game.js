@@ -29,6 +29,15 @@ const dist  = (a, b)   => Math.hypot(a.x - b.x, a.y - b.y);
 const rand  = (min, max) => min + Math.random() * (max - min);
 const randInt = (min, max) => Math.floor(rand(min, max + 1));
 
+// Traza un polígono cerrado sobre ctx a partir de vértices [[x, y], ...]
+function tracePoly(verts) {
+  ctx.beginPath();
+  ctx.moveTo(verts[0][0], verts[0][1]);
+  for (let i = 1; i < verts.length; i++)
+    ctx.lineTo(verts[i][0], verts[i][1]);
+  ctx.closePath();
+}
+
 // ── Bullet ────────────────────────────────────────────────────────────────────
 class Bullet {
   constructor(x, y, angle) {
@@ -209,6 +218,40 @@ class PowerUp {
   }
 }
 
+// ── Skins ─────────────────────────────────────────────────────────────────────
+// Cada skin define silueta (verts), color de trazo y color de la llama.
+// La nariz se mantiene en x ≈ 20: tryShoot() origina las balas ahí (NOSE = 21).
+const SKINS = [
+  { nombre: 'Clásica', color: '#fff', llama: 'rgba(255, 130, 0, 0.85)',
+    verts: [[20, 0], [-12, -9], [-7, 0], [-12, 9]] },
+  { nombre: 'Cazador', color: '#0f0', llama: 'rgba(0, 255, 130, 0.85)',
+    verts: [[20, 0], [-10, -13], [-6, -4], [-9, 0], [-6, 4], [-10, 13]] },
+  { nombre: 'Dardo', color: '#f46', llama: 'rgba(255, 70, 110, 0.85)',
+    verts: [[24, 0], [-10, -4], [-7, 0], [-10, 4]] },
+  { nombre: 'Colibrí', color: '#0ef', llama: 'rgba(130, 220, 255, 0.85)',
+    verts: [[18, 0], [-8, -11], [-10, -4], [-5, 0], [-10, 4], [-8, 11]] },
+];
+
+const SKIN_KEY = 'asteroids-skin';   // clave en localStorage
+let skinIndex = 0;
+let skinToast = 0;                   // segundos restantes del aviso "SKIN: …"
+
+function saveSkin() {
+  try { localStorage.setItem(SKIN_KEY, String(skinIndex)); } catch (e) {}
+}
+
+// Restaura la skin elegida; ignora valores corruptos o fuera de rango
+try {
+  const saved = parseInt(localStorage.getItem(SKIN_KEY), 10);
+  if (Number.isInteger(saved)) skinIndex = wrap(saved, SKINS.length);
+} catch (e) {}
+
+function cycleSkin() {
+  skinIndex = (skinIndex + 1) % SKINS.length;
+  skinToast = 1.5;   // el aviso dura 1.5 s
+  saveSkin();
+}
+
 // ── Ship ──────────────────────────────────────────────────────────────────────
 class Ship {
   constructor() { this.reset(); }
@@ -270,17 +313,12 @@ class Ship {
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
     // Contorno cian mientras dura el efecto Velocidad
-    ctx.strokeStyle = this.speedTime > 0 ? '#0ff' : '#fff';
+    ctx.strokeStyle = this.speedTime > 0 ? '#0ff' : SKINS[skinIndex].color;
     ctx.lineWidth   = 1.5;
     ctx.lineJoin    = 'round';
 
-    // Silueta clásica: triángulo con muesca trasera
-    ctx.beginPath();
-    ctx.moveTo( 20,  0);   // nariz
-    ctx.lineTo(-12, -9);   // ala izquierda
-    ctx.lineTo( -7,  0);   // muesca trasera
-    ctx.lineTo(-12,  9);   // ala derecha
-    ctx.closePath();
+    // Silueta de la skin activa
+    tracePoly(SKINS[skinIndex].verts);
     ctx.stroke();
 
     // Llama del propulsor
@@ -289,7 +327,7 @@ class Ship {
       ctx.moveTo(-8, -4);
       ctx.lineTo(-8 - rand(6, 14), 0);
       ctx.lineTo(-8,  4);
-      ctx.strokeStyle = 'rgba(255, 130, 0, 0.85)';
+      ctx.strokeStyle = SKINS[skinIndex].llama;
       ctx.stroke();
     }
 
@@ -391,6 +429,10 @@ function killShip() {
 
 // ── Update ────────────────────────────────────────────────────────────────────
 function update(dt) {
+  // Rotación de skin con C (edge-detect), disponible en cualquier estado
+  if (pressed('KeyC')) cycleSkin();
+  if (skinToast > 0) skinToast = Math.max(skinToast - dt, 0);
+
   if (state === 'gameover') {
     if (pressed('Space')) initGame();
     particles.forEach(p => p.update(dt));
@@ -485,15 +527,11 @@ function drawLifeIcon(x, y) {
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(-Math.PI / 2);
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth   = 1.2;
+  ctx.scale(0.45, 0.45);
+  ctx.strokeStyle = SKINS[skinIndex].color;
+  ctx.lineWidth   = 2.7;   // ≈ 1.2 px efectivos tras el escalado
   ctx.lineJoin    = 'round';
-  ctx.beginPath();
-  ctx.moveTo( 9,  0);
-  ctx.lineTo(-6, -5);
-  ctx.lineTo(-3,  0);
-  ctx.lineTo(-6,  5);
-  ctx.closePath();
+  tracePoly(SKINS[skinIndex].verts);
   ctx.stroke();
   ctx.restore();
 }
@@ -515,6 +553,15 @@ function drawHUD() {
     ctx.fillStyle = '#0ff';
     ctx.textAlign = 'left';
     ctx.fillText(`VELOCIDAD ${ship.speedTime.toFixed(1)}s`, 14, H - 14);
+  }
+
+  // Aviso temporal al cambiar de skin (se desvanece al final)
+  if (skinToast > 0) {
+    ctx.globalAlpha = Math.min(skinToast / 0.5, 1);
+    ctx.fillStyle = SKINS[skinIndex].color;
+    ctx.textAlign = 'center';
+    ctx.fillText(`SKIN: ${SKINS[skinIndex].nombre}`, W / 2, H - 14);
+    ctx.globalAlpha = 1;
   }
 }
 

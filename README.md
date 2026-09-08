@@ -24,11 +24,12 @@ Luego visita `http://localhost:3000`.
 
 ## Controles
 
-| Tecla     | Acción     |
-| --------- | ---------- |
-| `←` `→`   | Rotar nave |
-| `↑`       | Propulsar  |
-| `Espacio` | Disparar   |
+| Tecla     | Acción                  |
+| --------- | ----------------------- |
+| `←` `→`   | Rotar nave              |
+| `↑`       | Propulsar               |
+| `Espacio` | Disparar                |
+| `C`       | Cambiar skin de la nave |
 
 ## Puntuación
 
@@ -44,3 +45,4 @@ Luego visita `http://localhost:3000`.
 - Asteroides se parten en fragmentos más pequeños al ser destruidos
 - Partículas de explosión al destruir asteroides
 - Power-up **Velocidad**: 10% de probabilidad al destruir un asteroide; duplica el empuje de la nave durante 5 segundos
+- **Skins de nave**: 4 siluetas y colores para elegir con la tecla `C`; la selección se recuerda entre sesiones
