@@ -1,0 +1,252 @@
+name: Triaje de issues
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: triaje-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  triaje:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Extraer datos del issue y contexto del repo
+        run: |
+          set -euo pipefail
+          DIR="${RUNNER_TEMP}/triaje"
+          mkdir -p "${DIR}"
+          jq -r '.issue.number' "${GITHUB_EVENT_PATH}" > "${DIR}/numero"
+          jq -r '.issue.title' "${GITHUB_EVENT_PATH}" > "${DIR}/titulo"
+          jq -r '.issue.body // ""' "${GITHUB_EVENT_PATH}" > "${DIR}/cuerpo"
+          jq -r '.issue.user.login' "${GITHUB_EVENT_PATH}" > "${DIR}/autor"
+          jq -r '.issue.created_at' "${GITHUB_EVENT_PATH}" > "${DIR}/fecha"
+          git rev-parse --short HEAD > "${DIR}/sha"
+          sed -n 's|^// ── \(.*\) ──*$|\1|p' game.js > "${DIR}/secciones"
+
+      - name: Instalar opencode
+        run: |
+          set -euo pipefail
+          curl -fsSL https://opencode.ai/install | bash
+          echo "${HOME}/.opencode/bin" >> "${GITHUB_PATH}"
+
+      - name: Clasificar issue con IA
+        timeout-minutes: 5
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_PERMISSION: '{"bash": "deny", "edit": "deny"}'
+        run: |
+          set -euo pipefail
+          DIR="${RUNNER_TEMP}/triaje"
+          cat > "${DIR}/prompt.md" <<'PROMPT'
+          Eres el clasificador automático de issues del repositorio «Asteroids», un clon del juego clásico en HTML5 Canvas con vanilla JS; toda la lógica del juego vive en un único archivo game.js.
+
+          Analiza el issue que aparece al final y responde ÚNICAMENTE con un objeto JSON válido, sin texto antes ni después y sin bloques de código. Formato exacto:
+
+          {"labels": ["..."], "tipo": "Bug|Mejora|Documentación|Pregunta", "prioridad": "alta|media|baja", "resumen": "...", "secciones": ["..."], "checklist": ["..."]}
+
+          Reglas:
+          - "labels": entre 1 y 2 valores tomados exclusivamente de esta lista: bug, mejora, documentación, pregunta.
+            - bug: algo no funciona o funciona distinto a lo esperado.
+            - mejora: funcionalidad nueva o cambio en algo existente.
+            - documentación: README, comentarios o aclaraciones de uso.
+            - pregunta: consulta, duda o pedido de información.
+          - "tipo": una de estas opciones: Bug, Mejora, Documentación, Pregunta.
+          - "prioridad": una de estas opciones: alta, media, baja.
+          - "resumen": una sola línea en español que resuma el issue.
+          - "secciones": nombres exactos de las secciones de game.js (de la lista del final) probablemente afectadas; lista vacía si no aplica.
+          - "checklist": entre 2 y 4 pasos cortos y accionables en español para quien revise el issue.
+          - No uses ninguna herramienta; responde directamente con el JSON.
+          PROMPT
+          {
+            printf '\n## Título del issue\n\n%s\n\n' "$(cat "${DIR}/titulo")"
+            printf '\n## Cuerpo del issue\n\n%s\n\n' "$(cat "${DIR}/cuerpo")"
+            printf '\n## Secciones de game.js\n\n%s\n\n' "$(cat "${DIR}/secciones")"
+          } >> "${DIR}/prompt.md"
+          if RESPUESTA="$(timeout 240 opencode run -m opencode-go/glm-5.3 "$(cat "${DIR}/prompt.md")" 2>"${DIR}/stderr.log")"; then
+            printf '%s\n' "${RESPUESTA}" > "${DIR}/respuesta"
+          else
+            : > "${DIR}/respuesta"
+            {
+              echo "### Triaje de issues"
+              echo ""
+              echo "La clasificación con IA falló; se aplicará la etiqueta \`needs-triage\`."
+              echo ""
+              echo '```text'
+              tail -n 20 "${DIR}/stderr.log"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Validar clasificación y armar el cuerpo formateado
+        env:
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import re
+
+          D = os.path.join(os.environ["RUNNER_TEMP"], "triaje")
+
+          def leer(nombre):
+              with open(os.path.join(D, nombre), encoding="utf-8") as f:
+                  return f.read()
+
+          ALIAS = {
+              "bug": "bug", "error": "bug", "fallo": "bug",
+              "mejora": "mejora", "enhancement": "mejora", "feature": "mejora",
+              "documentación": "documentación", "documentacion": "documentación",
+              "documentation": "documentación", "docs": "documentación", "doc": "documentación",
+              "pregunta": "pregunta", "question": "pregunta", "consulta": "pregunta", "duda": "pregunta",
+          }
+
+          FALLBACK = {
+              "labels": ["needs-triage"],
+              "tipo": "Sin clasificar",
+              "prioridad": "media",
+              "resumen": "No se pudo clasificar automáticamente; requiere revisión manual.",
+              "secciones": [],
+              "checklist": ["Clasificar el issue manualmente y completar esta sección"],
+          }
+
+          datos = {}
+          try:
+              respuesta = leer("respuesta")
+          except FileNotFoundError:
+              respuesta = ""
+          if respuesta.strip():
+              texto = re.sub(r"```[a-zA-Z]*", "", respuesta)
+              m = re.search(r"\{.*\}", texto, re.S)
+              if m:
+                  try:
+                      datos = json.loads(m.group(0))
+                  except Exception:
+                      datos = {}
+
+          secciones_validas = [s.strip() for s in leer("secciones").splitlines() if s.strip()]
+
+          labels = []
+          for l in (datos.get("labels") or []):
+              normalizado = ALIAS.get(str(l).strip().lower())
+              if normalizado and normalizado not in labels:
+                  labels.append(normalizado)
+              if len(labels) >= 2:
+                  break
+
+          if not labels:
+              analisis = dict(FALLBACK)
+          else:
+              tipo = str(datos.get("tipo") or "").strip() or "Issue"
+              prioridad = str(datos.get("prioridad") or "").strip().lower()
+              if prioridad not in ("alta", "media", "baja"):
+                  prioridad = "media"
+              resumen = re.sub(r"\s+", " ", str(datos.get("resumen") or "")).strip()
+              if not resumen:
+                  resumen = FALLBACK["resumen"]
+              secciones = []
+              for s in (datos.get("secciones") or []):
+                  s = str(s).strip()
+                  if s in secciones_validas and s not in secciones:
+                      secciones.append(s)
+              checklist = []
+              for c in (datos.get("checklist") or []):
+                  c = re.sub(r"\s+", " ", str(c)).strip()
+                  if c:
+                      checklist.append(c)
+              checklist = checklist[:4] or FALLBACK["checklist"]
+              analisis = {
+                  "labels": labels,
+                  "tipo": tipo,
+                  "prioridad": prioridad,
+                  "resumen": resumen[:250],
+                  "secciones": secciones,
+                  "checklist": checklist,
+              }
+
+          with open(os.path.join(D, "analisis.json"), "w", encoding="utf-8") as f:
+              json.dump(analisis, f, ensure_ascii=False, indent=2)
+
+          cuerpo = leer("cuerpo").strip()
+          if not cuerpo:
+              cuerpo = "*(El issue no incluye cuerpo; solo título.)*"
+          autor = leer("autor").strip()
+          fecha = leer("fecha").strip().replace("T", " ").replace("Z", " UTC")
+          sha = leer("sha").strip()
+          run_url = os.environ.get("WORKFLOW_RUN_URL", "").strip()
+          secciones_txt = ", ".join("`{0}`".format(s) for s in analisis["secciones"]) or "—"
+          checklist_txt = "\n".join("  - [ ] {0}".format(c) for c in analisis["checklist"])
+
+          cuerpo_final = (
+              "> [!NOTE]\n"
+              "> Issue formateado y clasificado automáticamente por el workflow **Triaje de issues**.\n"
+              "> El texto original del autor se conserva íntegro en la sección «Texto original».\n\n"
+              "| Campo | Valor |\n"
+              "| ----- | ----- |\n"
+              "| Autor | @{0} |\n".format(autor)
+              + "| Creado | {0} |\n".format(fecha)
+              + "| Commit | `{0}` |\n".format(sha)
+          )
+          if run_url:
+              cuerpo_final += "| Ejecución | [ver workflow]({0}) |\n".format(run_url)
+
+          cuerpo_final += (
+              "\n## Texto original\n\n"
+              + cuerpo
+              + "\n\n---\n\n"
+              "## Información de triaje\n\n"
+              "- **Clasificación:** {0}\n".format(analisis["tipo"])
+              + "- **Prioridad sugerida:** {0}\n".format(analisis["prioridad"])
+              + "- **Resumen:** {0}\n".format(analisis["resumen"])
+              + "- **Secciones probablemente afectadas:** {0}\n".format(secciones_txt)
+              + "- **Checklist de revisión:**\n"
+              + checklist_txt
+              + "\n"
+          )
+
+          with open(os.path.join(D, "nuevo-cuerpo.md"), "w", encoding="utf-8") as f:
+              f.write(cuerpo_final)
+
+          print("Labels: " + ", ".join(analisis["labels"]))
+          PYEOF
+
+      - name: Aplicar etiquetas y actualizar el issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          DIR="${RUNNER_TEMP}/triaje"
+          NUMERO="$(cat "${DIR}/numero")"
+
+          crear_label() {
+            gh label create "$1" --color "$2" --description "$3" --force > /dev/null 2>&1 || true
+          }
+          crear_label "bug" "d73a4a" "Algo no funciona o funciona mal"
+          crear_label "mejora" "a2eeef" "Funcionalidad nueva o cambio en algo existente"
+          crear_label "documentación" "0075ca" "README, comentarios o documentación"
+          crear_label "pregunta" "d876e3" "Consulta, duda o pedido de información"
+          crear_label "needs-triage" "ededed" "Requiere clasificación manual"
+
+          LABELS="$(jq -r '.labels | join(",")' "${DIR}/analisis.json")"
+          gh issue edit "${NUMERO}" --add-label "${LABELS}" --body-file "${DIR}/nuevo-cuerpo.md"
+
+          {
+            echo "### Triaje del issue #${NUMERO}"
+            echo ""
+            echo "- **Etiquetas aplicadas:** ${LABELS}"
+            echo "- **Prioridad sugerida:** $(jq -r '.prioridad' "${DIR}/analisis.json")"
+            echo "- **Resumen:** $(jq -r '.resumen' "${DIR}/analisis.json")"
+          } >> "${GITHUB_STEP_SUMMARY}"
