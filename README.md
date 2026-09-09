@@ -39,10 +39,13 @@ Luego visita `http://localhost:3000`.
 | Mediano   | 50     |
 | Pequeño   | 100    |
 
+Con la skin **Titán** todos los puntos se duplican (x2), incluida la bonificación de la estrella fugaz.
+
 ## Características
 
 - 3 vidas con invencibilidad temporal al reaparecer (parpadeo)
 - Asteroides se parten en fragmentos más pequeños al ser destruidos
 - Partículas de explosión al destruir asteroides
 - Power-up **Velocidad**: 10% de probabilidad al destruir un asteroide; duplica el empuje de la nave durante 5 segundos
-- **Skins de nave**: 4 siluetas y colores para elegir con la tecla `C`; la selección se recuerda entre sesiones
+- **Skins de nave**: 5 siluetas y colores para elegir con la tecla `C`; la selección se recuerda entre sesiones
+- **Skin Titán**: nave morada el doble de grande que la original que otorga el doble de puntos, a cambio de ser un blanco más fácil de acertar
